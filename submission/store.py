@@ -132,3 +132,21 @@ def store_summary(st: SnapshotStore) -> dict:
         "passages": len(st.passages), "hours_blocks": len(st.hours), "links": len(st.links),
         "acronyms": len(acronym_map(st)),
     }
+
+
+YEAR_IN_NAME_RE = __import__("re").compile(r"(?<!\d)(20[0-4]\d)(?!\d)")
+
+
+def page_date(store: SnapshotStore, url: str) -> str:
+    """When a page's statement was made: its byline date; else, for an undated official
+    page, a year named in its title or URL ("2025 Impact Report" -> end of 2025, capped at
+    the crawl date); else the crawl date (it is what the site says now)."""
+    page = store.pages[url]
+    if page.published:
+        return page.published
+    if page.tier > 3:
+        return ""
+    years = [int(y) for y in YEAR_IN_NAME_RE.findall(page.title + " " + url)]
+    if years:
+        return min(f"{max(years)}-12-31", store.taken_on)
+    return store.taken_on

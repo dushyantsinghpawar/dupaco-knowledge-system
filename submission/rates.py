@@ -32,6 +32,9 @@ RATE_WORDS = terms("rate rates apr apy dividend dividends interest yield yields 
 FILLER = terms(
     "dupaco credit union cu current currently today now right latest good great better standard basic "
     "normal typical average general usual offer offers offered get give provide show see find want need only just "
+    "did was were will one about around roughly approximately dollar dollars "
+    "january february march april may june july august september october november december "
+    "jan feb mar jun jul aug sep sept oct nov dec "
     "looking much tell know like charge charged available")
 LIST_WORDS = terms("offer offers offered all list every types kinds options available")
 HIGHEST = terms("highest best top most maximum max greatest")
@@ -49,6 +52,8 @@ SOFT_FLAGS = {  # flag -> (words that mark a row, words in a question that ask f
     "cashout": (terms("cash-out"), terms("cash-out")),  # a different product from a plain refinance
     "relief": (terms("relief"), terms("relief")),
 }
+MIN_OPEN_RE = re.compile(r"\bminimum (?:to open|deposit|opening|balance to open)|\bhow much (?:do i need )?to open\b", re.I)
+NEGATION_RE = re.compile(r"\b(?:not|non|excluding|except|other than|rather than)[- ]+(?:the |a |an )?([a-z]+)", re.I)
 PENALTY = 1000.0  # larger than any overlap score: an unrequested qualifier always loses
 # A word on at most this many rows is a product NAME (Achieve, Bright, Launchpad), not a
 # qualifier shared by many products (business, jumbo, regular).
@@ -72,10 +77,13 @@ class _RowInfo:
     name: frozenset          # product name words: nearest heading + row label
     quals: tuple             # (term_months, amount_range, year_range)
     order: int
+    borrowed: frozenset = frozenset()  # product words taken from the details page title
 
 
 def _content(tokens) -> frozenset:
-    return frozenset(t for t in tokens if t not in RATE_WORDS and not t[0].isdigit())
+    # Numbers are qualifiers, not names; ordinals are names ("1st Rate Checking").
+    return frozenset(t for t in tokens if t not in RATE_WORDS
+                     and (not t[0].isdigit() or re.fullmatch(r"\d+(?:st|nd|rd|th)", t)))
 
 
 
@@ -140,6 +148,7 @@ class RateIndex:
         for info in self.infos:
             extra = {t for t in title_words.get(id(info), ())
                      if df.get(t, 0) + receivers[t] <= DISTINCTIVE_DF}
+            info.borrowed = frozenset(extra - info.prod)  # from the details title, not the row itself
             info.prod = info.prod | extra
             info.cooc = info.cooc | extra
         df = defaultdict(int)
@@ -186,7 +195,8 @@ RATE_ASK_RE = re.compile(
 
 def is_rate_question(question: str) -> bool:
     q = set(tokenize(question))
-    return bool(q & (RATE_WORDS - PAY_WORDS)) or bool(q & PAY_WORDS and PAY_ASK_RE.search(question))
+    return (bool(q & (RATE_WORDS - PAY_WORDS)) or bool(q & PAY_WORDS and PAY_ASK_RE.search(question))
+            or bool(MIN_OPEN_RE.search(question)))
 
 
 def _question_amount(question: str) -> Optional[tuple[float, float]]:
@@ -197,9 +207,38 @@ def _question_amount(question: str) -> Optional[tuple[float, float]]:
         if m.group(2) or (m.group(4) is not None):
             v *= 1000
         vals.append(v)
+    # "fifteen thousand dollars", "a thirty-thousand-dollar loan"
+    for m in WORD_THOUSAND_RE.finditer(question):
+        n = words_to_number(m.group(1))
+        if n:
+            vals.append(n * 1000.0)
+    # "12 thousand", "a balance of 12k" without a dollar sign.
+    for m in re.finditer(r"\b(\d+(?:\.\d+)?)\s*(?:thousand|grand)\b", question, re.I):
+        vals.append(float(m.group(1)) * 1000)
     if not vals:
         return None
     return (min(vals), max(vals))
+
+
+_UNITS = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen "
+                                    "fourteen fifteen sixteen seventeen eighteen nineteen".split())}
+_TENS = {w: 10 * i for i, w in enumerate("_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()) if w != "_"}
+WORD_THOUSAND_RE = re.compile(
+    r"\b((?:(?:" + "|".join(sorted(list(_UNITS) + list(_TENS) + ["hundred", "and"], key=len, reverse=True))
+    + r")[\s-]*)+)[\s-]*thousand\b", re.I)
+
+
+def words_to_number(text: str) -> int:
+    """"two hundred fifty" -> 250, "thirty" -> 30 (enough for amounts said in words)."""
+    total = 0
+    for w in re.split(r"[\s-]+", text.lower()):
+        if w in _UNITS:
+            total += _UNITS[w]
+        elif w in _TENS:
+            total += _TENS[w]
+        elif w == "hundred":
+            total = max(total, 1) * 100
+    return total
 
 
 def _question_year(question: str) -> Optional[int]:
@@ -238,7 +277,12 @@ def _fmt_date(iso: str) -> str:
 
 def answer_rate(store, question: str, idx: RateIndex):
     """Returns (text, rows, confident) or None when no rate row is about this question."""
-    q_tokens = tokenize(question)
+    # "regular, not jumbo", "non-jumbo", "the dividend rate (not the APY)": a negated word
+    # is something the member does NOT want, so it must not count as asked for.
+    negated = set()
+    for m in NEGATION_RE.finditer(question):
+        negated |= set(tokenize(m.group(1)))
+    q_tokens = [t for t in tokenize(NEGATION_RE.sub(" ", question))]
     q = set(q_tokens)
     concept = _unpriced_concept(q_tokens, idx)
     if concept:
@@ -246,7 +290,7 @@ def answer_rate(store, question: str, idx: RateIndex):
                 "Please contact the credit union for a quote.", [], False)
 
     listing = bool(q & LIST_WORDS)
-    asked = {f for f, (_, words) in SOFT_FLAGS.items() if q & words}
+    asked = {f for f, (_, words) in SOFT_FLAGS.items() if q & words and not words & negated}
     wanted = q - RATE_WORDS - FILLER
 
     live = [i for i in idx.infos if (i.row.url, i.row.table) not in idx.stale_tables]
@@ -264,9 +308,13 @@ def answer_rate(store, question: str, idx: RateIndex):
     year = _question_year(question)
     amount = _question_amount(question)
 
+    # A term filters only products that are priced by term: "after the 6-month intro" on a
+    # money market describes the promotion, not a 6-month product.
+    termed = {i.name for i in live if i.row.term_months}
+
     def fits(i: _RowInfo) -> bool:
         r = i.row
-        return ((not terms_asked or r.term_months in terms_asked)
+        return ((not terms_asked or i.name not in termed or r.term_months in terms_asked)
                 and (year is None or r.year_range is None or r.year_range[0] <= year <= r.year_range[1])
                 and (amount is None or r.amount_range is None
                      or (r.amount_range[0] - 0.01 <= amount[0] and amount[1] <= r.amount_range[1] + 0.01)))
@@ -278,7 +326,17 @@ def answer_rate(store, question: str, idx: RateIndex):
     # instead of jumping to another product.
     scored = [(score(i), i) for i in live if overlap[id(i)] > 0]
     fitting = [(s, i) for s, i in scored if fits(i)]
-    if not fitting or max(overlap[id(i)] for _, i in fitting) < 0.5 * max(overlap[id(i)] for _, i in scored):
+    # The product meant must keep the question's most specific product word: "48-month auto
+    # on a 2022 car" must not become an ATV loan, "$8,000 boat loan" must not either.
+    # The key word comes from the best match AFTER qualifier penalties (how the product is
+    # chosen), so an unrequested intro/jumbo row cannot define the product.
+    best_scored = max(sc for sc, _ in scored)
+    key_words = {t for sc, i in scored if sc >= best_scored - 1e-9 for t in wanted & i.prod}
+    key = max(sorted(key_words), key=lambda t: idx.idf.get(t, 0.0), default=None)
+    if key:
+        fitting = [(s, i) for s, i in fitting if key in i.prod - i.borrowed]
+    top_ref = max(overlap[id(i)] for sc, i in scored if sc >= best_scored - 1e-9)
+    if not fitting or max(overlap[id(i)] for _, i in fitting) < 0.5 * top_ref:
         return ("That combination isn't listed on the published rates. Please contact the credit union for details.",
                 [], False)
     best = max(s for s, _ in fitting)
@@ -326,6 +384,14 @@ def answer_rate(store, question: str, idx: RateIndex):
         unique = [pick]
 
     unique = unique[:12]
+    if MIN_OPEN_RE.search(question):
+        # "Minimum to open" is a column of the same table: answer it, not the rate.
+        mins = [(i.row.label or (i.row.section[-1] if i.row.section else ""), i.row.cells.get("min_open"))
+                for i in unique if i.row.cells.get("min_open")]
+        if mins:
+            distinct = list(dict.fromkeys(m for _, m in mins))
+            name = mins[0][0].split("(")[0].strip()
+            return (f"{name}: minimum to open {', '.join(distinct)}.", [i.row for i in unique[:1]], True)
     lines = [i.row.text for i in unique]
     dates = {i.row.effective for i in unique if i.row.effective}
     text = lines[0] + "." if len(lines) == 1 else "Rates:\n" + "\n".join(f"- {l}" for l in lines)

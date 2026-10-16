@@ -24,7 +24,8 @@ import re
 
 NUMBER_WORDS = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
-    "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "fifteen": 15, "eighteen": 18,
+    "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty-five": 25, "thirty-two": 32,
     "twenty": 20, "twenty-four": 24, "thirty": 30, "thirty-six": 36, "forty": 40,
     "forty-eight": 48, "sixty": 60, "seventy-two": 72, "eighty-four": 84,
 }
@@ -56,6 +57,9 @@ SYNONYMS = [
     (r"cars?|vehicles?|automobiles?", "auto"),
     (r"telephone|phone number", "phone"),
     (r"updat(?:e|es|ed|ing)|modif(?:y|ies|ied)|edit(?:s|ed|ing)?", "change"),
+    (r"refinanc(?:e|es|ed|ing)|refis?", "refinance"),
+    (r"purchas(?:es|ed|ing)|buying an? (?:home|house)|home purchase", "purchase"),
+    (r"hq|head ?quarter(?:s|ed)?", "headquarters"),
     # The site's own links use "Become a member" and "Join Dupaco" for the same action.
     (r"become (?:a |an )?(?:dupaco )?members?", "join"),
 ]

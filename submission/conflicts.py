@@ -211,5 +211,50 @@ def count_conflicts(stores) -> list[Conflict]:
     return out
 
 
+# Words that name no specific product: a table headed only "Saving Account Rates".
+GENERIC_NAME = frozenset(tokenize("saving savings account accounts rate rates"))
+
+
+def ambiguous_label_conflicts(stores) -> list[Conflict]:
+    """A table whose heading names no specific product reads as the generic product, so a
+    different value than the NAMED product for the same balance tier on the same sheet is a
+    contradiction a member would see (01-04: "Saving Account Rates $25,000+: 0.35%", really
+    the HSA table, beside "Share Savings $25,000+: 0.20%"). Winner: the named product."""
+    found = {}  # one entry per generic table: its top balance tier vs the first named product
+    for st in stores:
+        obs = [_Obs(r, st, False) for r in st.rows if st.pages[r.url].tier <= 2 and not st.pages[r.url].carried_from]
+        for g in obs:
+            if not g.name or not g.name <= GENERIC_NAME or g.row.amount_range is None:
+                continue
+            for o in obs:
+                if (o.name - GENERIC_NAME and g.name <= o.name and o.row.url == g.row.url and not o.flags
+                        and o.row.amount_range == g.row.amount_range and set(o.row.metrics) == set(g.row.metrics)
+                        and o.value != g.value):
+                    # One contradiction however many pages and snapshots repeat it.
+                    key = (frozenset(g.name), frozenset(o.name))
+                    old = found.get(key)
+                    if old is None or g.row.amount_range[0] > old[0].row.amount_range[0]:
+                        found[key] = (g, o, st, (old[3] if old else set()))
+                    found[key][3].add((g.row.url, st.snapshot_id))
+                    break  # first named product on the page
+    out = []
+    for g, o, st, seen_on in found.values():
+        tier = o.row.cells.get("tier", "")
+        out.append(Conflict(
+            topic=f"{' '.join(sorted(o.name))} {tier} rate (generic '{g.row.section[-1] if g.row.section else g.row.label}' table)",
+            values=[" / ".join(g.value), " / ".join(o.value)],
+            sources=[Source(url=u, snapshot_id=sid, quote=g.row.text) for u, sid in sorted(seen_on)][:6]
+                    + [Source(url=o.row.url, snapshot_id=st.snapshot_id, quote=o.row.text)],
+            resolution=" / ".join(o.value),
+            reason="a table headed only with generic words shows a different rate for the same balance "
+                   "tier than the named product on the same sheet; the named product's rate is the one to trust"))
+    return out
+
+
 def build_conflicts(stores) -> list[Conflict]:
-    return rate_conflicts(stores) + count_conflicts(stores)
+    """Same-moment contradictions first (stale copies, mislabelled tables, boilerplate
+    counts), then values that only changed over time: the strongest evidence leads."""
+    rates = rate_conflicts(stores)
+    same_moment = [c for c in rates if "still shown" in c.reason or "expired" in c.reason]
+    over_time = [c for c in rates if c not in same_moment]
+    return same_moment + ambiguous_label_conflicts(stores) + count_conflicts(stores) + over_time

@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 from collections import Counter, defaultdict
 
+from store import page_date
 from text import terms, tokenize
 
 PHONE_RE = re.compile(r"\(?\b(\d{3})\)?[ .-]?(\d{3})-(\d{4})\b")
@@ -26,6 +27,9 @@ ROUTING_RE = re.compile(r"routing(?: and transit| transit)?(?: number| #|#)?\W{0
 SENTENCE_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"“])")
 
 PHONE_Q = terms("phone call calling fax")
+SERVICE_NUMBER_RE = re.compile(r"\b(?:customer|member) services?\b.*(?:\bnumber\b|#)", re.I)
+MAIL_Q_RE = re.compile(r"\bmailing address\b|\bp\.?\s?o\.? box\b|\bwhere (?:do|can|should) i (?:mail|send)\b", re.I)
+PO_BOX_RE = re.compile(r"P\.?\s?O\.?\s+Box\s+\d+,?\s+[A-Z][a-z]+,?\s+[A-Z]{2}\s*,?\s*\d{5}(?:-\d{4})?")
 ROUTING_Q = terms("routing aba")
 NOT_PURPOSE = terms(
     "phone call calling number numbers fax dupaco credit union what which who whom is the a to for "
@@ -78,11 +82,14 @@ class FactIndex:
         self.store = store
         official = [p for p in store.passages if store.pages[p.url].tier <= 3 and not store.pages[p.url].carried_from]
         self.routing: dict[str, set] = defaultdict(set)
+        self.mailing: dict[str, set] = defaultdict(set)
         self.phone_sents: list[tuple[str, str, str, frozenset]] = []   # number, sentence, url, tokens
         phone_pages: dict[str, set] = defaultdict(set)
         for p in official:
             for m in ROUTING_RE.finditer(p.text):
                 self.routing[m.group(1)].add(p.url)
+            for m in PO_BOX_RE.finditer(p.text):
+                self.mailing[re.sub(r"\s+", " ", m.group(0))].add(p.url)
             for s in _sentences(f"{p.text}"):
                 for m in PHONE_RE.finditer(s):
                     n = _norm_phone(m)
@@ -97,7 +104,7 @@ class FactIndex:
             page = store.pages[p.url]
             if page.tier > 4:
                 continue
-            date = page.published or (store.taken_on if page.tier <= 3 else None)
+            date = page_date(store, p.url) or None
             if not date:
                 continue
             for s in _sentences(p.text):
@@ -131,6 +138,12 @@ class FactIndex:
         urls = sorted(self.routing[value], key=lambda u: (self.store.pages[u].tier, u))
         return f"Dupaco's routing number is {value}.", urls, True
 
+    def mailing_answer(self):
+        if not self.mailing:
+            return None
+        value = max(sorted(self.mailing), key=lambda v: len(self.mailing[v]))
+        return f"Dupaco's mailing address is {value}.", sorted(self.mailing[value])[:3], True
+
     def phone_answer(self, question: str):
         purpose = set(tokenize(question)) - NOT_PURPOSE
         best, best_score = None, 0.0
@@ -155,6 +168,8 @@ class FactIndex:
         m = re.search(r"chief (\w+) officer", low)
         if q & ROLE_Q["board chair"]:
             key = "board chair"
+        elif m and m.group(1) == "executive":
+            key = "ceo"
         elif m:
             key = f"chief {m.group(1)} officer"
         elif q & ROLE_Q["officer"]:
@@ -189,11 +204,15 @@ def answer_fact(question: str, idx: FactIndex, phase: str):
     if phase == "before_rates":
         if q & ROUTING_Q:
             return idx.routing_answer()
+        if MAIL_Q_RE.search(question):
+            res = idx.mailing_answer()
+            if res:
+                return res
         if WHO_RE.search(question):
             res = idx.who_answer(question)
             if res:
                 return res
-        if q & PHONE_Q and not HOWTO_RE.search(question):
+        if (q & PHONE_Q or SERVICE_NUMBER_RE.search(question)) and not HOWTO_RE.search(question):
             return idx.phone_answer(question)
         return None
     if HOWTO_RE.search(question) and q & TASK_WORDS:

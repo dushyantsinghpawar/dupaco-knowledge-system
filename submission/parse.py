@@ -415,7 +415,8 @@ def parse_passages(url: str, title: str, markdown: str, extra_lines: list[str],
             heading = h
             continue
         lines = [clean(strip_links(x)) for x in b.splitlines() if x.strip()]
-        priced = [x for x in lines if PRICE_LINE_RE.search(x)]
+        # A line starting with "*" is a footnote ("*You will not be charged ... less than $5.00").
+        priced = [x for x in lines if PRICE_LINE_RE.search(x) and not x.startswith("*")]
         if len(lines) >= 3 and len(priced) >= 0.6 * len(lines):
             # A price list written as plain lines ("Domestic wire $25.00 each"): one fact per
             # line, exactly like the rows of a fee table.

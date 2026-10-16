@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 
+from store import page_date
 from text import STOPWORDS, terms, tokenize
 
 # Product nouns (same list the rate engine uses): a question naming one needs a passage
@@ -64,9 +65,7 @@ def _sentences(text: str) -> list[str]:
 
 
 def _date(store, url: str) -> str:
-    page = store.pages[url]
-    # An undated official page is dated by the snapshot: it is what the site says now.
-    return page.published or (store.taken_on if page.tier <= 3 else "")
+    return page_date(store, url)
 
 
 class GeneralIndex:

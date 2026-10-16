@@ -44,12 +44,17 @@ def _row_sources(rows, snapshot_id) -> list:
     return [Source(url=u, snapshot_id=snapshot_id) for u in urls[:4]]
 
 
-MONTH_NAMES = "january|february|march|april|may|june|july|august|september|october|november|december"
+MONTH_LIST = "january february march april may june july august september october november december".split()
+# Full names and common abbreviations ("aug", "sept"). Not "apr": on a rate site that is APR.
+MONTH_NAMES = "january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|jun|jul|aug|sept|sep|oct|nov|dec"
 # Only an explicit scoping phrase sets the date. Other dates in a question are content
 # ("the branch closes March 31, 2026"), not "answer as of".
+# A bare "<Month> <Year>" with no day ("rate 100k aug 2026") is also a scope; a full date
+# ("closes March 31, 2026") is content.
 SCOPE_RE = re.compile(
     rf"\b(?:as of|as at|back in|in|during)\s+(?:early |mid-|late )?({MONTH_NAMES})\s+(?:(\d{{1,2}}),?\s+)?(\d{{4}})\b"
-    r"|\bas of\s+(\d{4}-\d{2}-\d{2})\b", re.I)
+    r"|\bas of\s+(\d{4}-\d{2}-\d{2})\b"
+    rf"|\b({MONTH_NAMES})\s+(\d{{4}})\b", re.I)
 
 
 def scope_date(question: str) -> Optional[str]:
@@ -59,9 +64,10 @@ def scope_date(question: str) -> Optional[str]:
         return None
     if m.group(4):
         return m.group(4)
-    month = [x for x in MONTH_NAMES.split("|")].index(m.group(1).lower()) + 1
-    year = int(m.group(3))
-    day = int(m.group(2)) if m.group(2) else calendar.monthrange(year, month)[1]
+    name, year, day = (m.group(1), m.group(3), m.group(2)) if m.group(1) else (m.group(5), m.group(6), None)
+    month = next(k for k, full in enumerate(MONTH_LIST, 1) if full.startswith(name.lower()[:3]))
+    year = int(year)
+    day = int(day) if day else calendar.monthrange(year, month)[1]
     return f"{year:04d}-{month:02d}-{day:02d}"
 
 
@@ -107,6 +113,16 @@ class DupacoKnowledge:
         return self._rate_idx[st.snapshot_id]
 
     def answer(self, question: str, as_of: Optional[str] = None) -> Answer:
+        """Safety net: a bug in any handler must never crash the run or invent an answer.
+        It becomes an honest decline, and the error is printed so testing shows it."""
+        try:
+            return self._answer(question, as_of)
+        except Exception as e:  # noqa: BLE001 - deliberately broad, see docstring
+            print(f"[solution] answer() failed for {question!r}: {e!r}", file=sys.stderr)
+            return Answer(text="I'm not able to confirm that from the website. Please contact the credit union.",
+                          confident=False)
+
+    def _answer(self, question: str, as_of: Optional[str] = None) -> Answer:
         st = self.store_for(as_of or scope_date(question))
         sid = st.snapshot_id
         def rate_rows_for(q: str) -> list:
@@ -146,7 +162,11 @@ class DupacoKnowledge:
 
     def conflicts(self) -> list[Conflict]:
         if self._conflicts is None:  # computed once, after all snapshots are in
-            self._conflicts = build_conflicts(self.stores)
+            try:
+                self._conflicts = build_conflicts(self.stores)
+            except Exception as e:  # noqa: BLE001 - a bug here must not cost the answers
+                print(f"[solution] conflicts() failed: {e!r}", file=sys.stderr)
+                self._conflicts = []
         return self._conflicts
 
 

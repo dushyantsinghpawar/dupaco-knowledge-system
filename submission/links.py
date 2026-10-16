@@ -35,8 +35,13 @@ NOT_TOPIC = LINK_WORDS | terms(
     "what which where how use should could would see find view get go visit dupaco credit union "
     "official current online the for to of a an")
 GENERIC_ANCHORS = terms("keep reading read more continue learn more see details explore click here")
-DUPACO_HOSTS = ("www.dupaco.com", "join.dupaco.com", "shine.dupaco.com")
-APPLICATION_HOST = "join.dupaco.com"
+def _is_dupaco(host: str) -> bool:
+    return host == "dupaco.com" or host.endswith(".dupaco.com")
+
+
+# join./shine./homeloans.dupaco.com are where members apply; www is information.
+def _is_application(host: str) -> bool:
+    return _is_dupaco(host) and host != "www.dupaco.com"
 ARTICLE_PATHS = ("/learn/", "/newsroom/", "/business/resources/", "/dupacodaily/")
 RATE_SHEET = "https://www.dupaco.com/rates"
 
@@ -61,7 +66,7 @@ class LinkIndex:
         for l in store.links:
             t = l.target
             p = urlparse(t)
-            if p.netloc.lower() not in DUPACO_HOSTS:
+            if not _is_dupaco(p.netloc.lower()):
                 continue
             self.exact.add(t.split("?")[0])
             key = canonical_url(t.split("#")[0].split("?")[0])
@@ -73,7 +78,7 @@ class LinkIndex:
         # Pages nothing links to (e.g. the fee-schedule PDF) are still findable by their own
         # title and path; they just have no consensus.
         for url, info in store.pages.items():
-            if info.carried_from or info.expired or urlparse(url).netloc.lower() not in DUPACO_HOSTS:
+            if info.carried_from or info.expired or not _is_dupaco(urlparse(url).netloc.lower()):
                 continue
             words[url] |= set(tokenize(info.title + " " + urlparse(url).path.replace("/", " ").replace("-", " ")))
             pages.setdefault(url, set())
@@ -141,7 +146,7 @@ def answer_link(question: str, store, link_idx: LinkIndex, rate_rows_for):
         return ("That link isn't listed on the website. Please contact the credit union for help.", [], False)
     best = ranked[0][1]
     if ONLINE_ACTION_RE.search(question) or q & ACTION_WORDS:
-        apps = [u for _, u in ranked if urlparse(u).netloc == APPLICATION_HOST]
+        apps = [u for _, u in ranked if _is_application(urlparse(u).netloc)]
         info = [u for _, u in ranked if urlparse(u).netloc == "www.dupaco.com"]
         if apps:  # "apply for membership", "join online": the application site
             second = f" (more details: {info[0]})" if info else ""

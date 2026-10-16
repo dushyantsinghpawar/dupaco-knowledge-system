@@ -33,7 +33,7 @@ HOURS_WORDS = terms("hours hour lobby drive-up")
 # "today" is left out on purpose: "is the X branch still open today?" asks about status, not hours.
 DAY_WORDS = terms("monday tuesday wednesday thursday friday saturday sunday weekend weekends weekday weekdays")
 OPEN_CLOSE = terms("open opens close closes closing opening")
-ADDRESS_WORDS = terms("address located directions")
+ADDRESS_WORDS = terms("address located location directions")
 PHONE_WORDS = terms("phone call telephone")
 
 # Street-type abbreviations so "Mullan Avenue" matches "W Mullan Ave."
@@ -61,7 +61,8 @@ def is_hours_question(question: str) -> bool:
 
 
 def is_address_question(question: str) -> bool:
-    return bool(set(tokenize(question)) & ADDRESS_WORDS) or bool(re.search(r"\bwhere is\b", question, re.I))
+    return (bool(set(tokenize(question)) & ADDRESS_WORDS)
+            or bool(re.search(r"\bwhere is\b|\bwhere (?:can|do) i find\b", question, re.I)))
 
 
 def named_branch(question: str) -> Optional[set[str]]:
@@ -148,9 +149,18 @@ def general_hours(directory: BranchDirectory) -> tuple[str, list[str]]:
 
 def answer_branch(question: str, directory: BranchDirectory):
     """Returns (text, source_urls, confident) or None if this is not a branch question."""
+    if re.search(r"\bhow many\b|^\s*(?:the )?number of\b", question, re.I):
+        return None  # a count ("how many branch locations"), not a branch lookup
     hours_q, addr_q = is_hours_question(question), is_address_question(question)
     phone_q = bool(set(tokenize(question)) & PHONE_WORDS)
     name = named_branch(question)
+    if name is None and (hours_q or addr_q or phone_q):
+        # "where is dupaco in galena illinois": a known branch city, however it is typed.
+        low = " " + re.sub(r"[^a-z ]", " ", question.lower()) + " "
+        cities = sorted({r["city"] for r in directory.records if r.get("city")}, key=len, reverse=True)
+        city = next((c for c in cities if f" {c.lower()} " in low), None)
+        if city:
+            name = _name_tokens(city)
     if phone_q and name and not (hours_q or addr_q):
         # A branch's own number, or "not listed" - never another branch's or the main line.
         matches = directory.match(name)
