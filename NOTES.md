@@ -8,12 +8,14 @@ The website snapshots aren't in this repo. They're the credit union's data and w
 python harness/run_eval.py --submission submission --eval eval/public_eval.jsonl
 python harness/run_eval.py --submission submission --snapshots harness/selftest/snapshots \
     --eval harness/selftest/eval.jsonl --conflicts-gold harness/selftest/conflicts_gold.json
-python harness/run_eval.py --submission submission --eval tests/question_bank.jsonl   # my own 141 questions
+python harness/run_eval.py --submission submission --eval tests/question_bank.jsonl     # my own 141 questions
+python harness/run_eval.py --submission submission --eval tests/blind_bank.jsonl        # 106 written without seeing the code
+python harness/run_eval.py --submission submission --eval tests/paraphrase_bank.jsonl   # 70 questions x 4 wordings
 python -m unittest discover tests
 ```
 
 - **No API keys needed.** No network calls, no LLM, no third-party packages. It's Python 3.11 standard library only.
-- Ingesting all five snapshots takes about 25 seconds. p95 answer time is about 0.5 seconds.
+- Ingesting all five snapshots takes about 25 seconds. p95 answer time is about 0.6 seconds.
 - `python tools/inspect_store.py --help` lets you see what got parsed (rate rows, hours, search hits).
 
 ## The approach
@@ -31,12 +33,12 @@ I went with rules instead of an LLM on purpose. Most of the score is about numbe
 
 ## How it decides what's current
 
-1. **Pick the snapshot.** `as_of` selects the latest snapshot taken on or before that date. If the date is before the first crawl, it uses the first one. If there's no `as_of`, an explicit phrase in the question like "in May 2026" or "as of 2026-05-31" does the same thing. Any other date in the question is treated as content, not scope.
+1. **Pick the snapshot.** `as_of` selects the latest snapshot taken on or before that date. If the date is before the first crawl, it uses the first one. If there's no `as_of`, an explicit phrase in the question like "in May 2026", "aug 2026" or "as of 2026-05-31" does the same thing. Any other date in the question is treated as content, not scope.
 2. **Rank pages by authority.** Official rate sheets (`/rates`, `/business-rates`) come first, then product pages and official PDFs, then other official pages, then newsroom, then blog, then calculators, landing pages and campaigns. Tag and author listings, tracking duplicates and spreadsheets don't get indexed at all.
 3. **Effective dates win over page type.** If two copies of the same fact exist and one has an older "Rates are effective as of" date, the older table is stale. That's how calculator and landing-page copies lose. It also caught the rate sheet itself lagging behind a product page once (business 17-month jumbo, Aug 2026).
 4. **Expired offers are dropped.** If a page is marked expired, or says an offer ended before the snapshot date ("offer ended 2025-09-30"), it never answers anything. Its values only go into `conflicts()`.
 5. **Rates only come from rate rows.** Numbers from the newsroom, blog, calculators or landing pages never answer a rate question.
-6. **Dated statements.** For counts about the credit union itself ("22 branch office locations"), the newest dated statement wins. Stats tied to a year ("294 employees used VTO in 2023") get answered by year. For a running count ("the fifth time Forbes recognized Dupaco"), the newest statement wins.
+6. **Dated statements.** For counts about the credit union itself ("22 branch office locations"), the newest dated statement wins. Stats tied to a year ("294 employees used VTO in 2023") get answered by year. For a running count ("the fifth time Forbes recognized Dupaco"), the newest statement wins. An undated document is dated by the year in its title, so the "2025 Impact Report" counts as 2025, not as today.
 7. **Pages missing from a later snapshot** get carried forward but demoted. They never answer rates or identifiers, they rank at half weight, and the answer notes the page wasn't in the latest crawl. That keeps partial crawls safe without letting a deleted page beat a live one.
 
 ## Getting the tier right
@@ -58,7 +60,7 @@ It answers "isn't listed" (with `confident=False` and no extra numbers) when:
 - a named branch is unknown, or its hours or phone aren't published (it never borrows another branch's data)
 - a passage covers less than half of the question
 
-It never asks for a ZIP code, member number or any kind of authentication.
+It never asks for a ZIP code, member number or any kind of authentication. And if any handler ever throws an error, the answer becomes an honest "can't confirm" instead of a crash.
 
 ## conflicts()
 
@@ -66,10 +68,11 @@ There's one entry per fact, with every value listed oldest first, plus sources, 
 
 - the rate sheet changed over time, and/or a stale copy somewhere else (calculator, landing page, embedded table) has an older effective date
 - expired promotion pages showing a different value
+- a table labelled only with generic words ("Saving Account Rates", really the HSA at 0.35%) next to the named product on the same sheet (Share Savings at 0.20%)
 - counts repeated in boilerplate across 3+ pages ("19 / 20 / 22 / 23 / 24 branch office locations" -> 22)
 - running counts ("fourth time" vs "fifth time" -> fifth)
 
-The winner is always what `answer()` returns. Things I left out on purpose: tier or metric differences, year-tagged stats, and the Roth vs Traditional difference on one sheet, since that might be intentional. On the five snapshots there are 53 entries.
+The winner is always what `answer()` returns. Contradictions that exist at the same moment are listed first, then values that only changed over time. Things I left out on purpose: tier or metric differences, year-tagged stats, and the Roth vs Traditional difference on one sheet, since that might be intentional. On the five snapshots there are 54 entries. Against a stand-in gold list built from the practice set's traps that really appear on the site (`tests/conflicts_proxy_gold.json`, used only for testing), all 9 match and every winner is right.
 
 ## Results
 
@@ -77,7 +80,9 @@ The winner is always what `answer()` returns. Things I left out on purpose: tier
 |---|---|
 | Public practice set (40) | 0.969 (every scorable question; dup-005 has no `must_include`, so it can't be scored) |
 | Kit selftest (different site) | 1.0, conflicts F1 1.0 |
-| My question bank (141: rewordings, as_of per snapshot, refusals, fees, counts, links) | 0.96, 0 stale-trap hits, paraphrase consistency 0.93 |
+| My question bank (141: rewordings, as_of per snapshot, refusals, fees, counts, links) | 0.97, 0 stale-trap hits, paraphrase consistency 0.93 |
+| Blind set (106, written by a separate agent that only read the snapshots) | 0.91, 0 stale-trap hits (0.77 on first run, before fixing the general patterns it exposed) |
+| Paraphrase set (70 questions x 4 wordings) | 0.95, 0 stale-trap hits, paraphrase consistency 0.91 |
 
 ## Known limits
 
