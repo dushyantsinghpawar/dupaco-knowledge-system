@@ -1,9 +1,8 @@
 # NOTES: a knowledge system that knows what's true now
 
-## Running it
+## How to run it
 
-The website snapshots are not in this repo (they are the credit union's data, shared
-for this event only). Copy the kit's `snapshots_zip/` folder into the repo root, then:
+The website snapshots aren't in this repo. They're the credit union's data and were only shared for this event. Copy the kit's `snapshots_zip/` folder into the repo root, then run:
 
 ```bash
 python harness/run_eval.py --submission submission --eval eval/public_eval.jsonl
@@ -13,117 +12,80 @@ python harness/run_eval.py --submission submission --eval tests/question_bank.js
 python -m unittest discover tests
 ```
 
-- **API keys: none.** No network calls, no LLM, no third-party packages (Python 3.11 standard library only).
-- Ingest of all five snapshots takes about 25 seconds. p95 answer time is about 0.5 seconds.
-- `python tools/inspect_store.py --help` shows what was parsed (rate rows, hours, search hits).
+- **No API keys needed.** No network calls, no LLM, no third-party packages. It's Python 3.11 standard library only.
+- Ingesting all five snapshots takes about 25 seconds. p95 answer time is about 0.5 seconds.
+- `python tools/inspect_store.py --help` lets you see what got parsed (rate rows, hours, search hits).
 
-## Approach in one paragraph
+## The approach
 
-Everything that is expensive or judgement-based happens once, at ingest, and is kept per
-snapshot. Each snapshot becomes a store of typed facts: rate rows parsed from tables (with
-term, model-year range, balance tier, effective date and the "See details" product page),
-branch hours and addresses, links, definitions, and text passages indexed with BM25.
-`answer()` picks the snapshot, routes the question to one handler (links, branches,
-routing/phone/who-is, rates, how-to, general facts and counts) and returns one value set
-with its sources. The system is deterministic, so the same question always gets the same
-answer, and every output can be traced to a rule.
+I do all the expensive and judgement-heavy work once, at ingest, and keep it per snapshot. Each snapshot turns into a store of typed facts:
 
-I chose rules over an LLM on purpose. Most of the score is numeric (one current value, no
-stale value anywhere in the answer, the same numbers across paraphrases, under 2 seconds).
-Determinism wins all four, and a reviewer can run it without keys.
+- rate rows parsed from tables, with term, model-year range, balance tier, effective date and the "See details" product page
+- branch hours and addresses
+- links and definitions
+- text passages indexed with BM25
 
-## How the system decides what is current
+When `answer()` gets a question, it picks the snapshot, sends the question to one handler (links, branches, routing/phone/who-is, rates, how-to, or general facts and counts) and returns one set of values with their sources. It's deterministic, so the same question always gets the same answer, and you can trace every output back to a rule.
 
-1. **Which snapshot.** `as_of` selects the latest snapshot taken on or before that date
-   (dates before the first crawl use the first). Without `as_of`, an explicit phrase in the
-   question ("in May 2026", "as of 2026-05-31") does the same; other dates in a question are
-   content, not scope.
-2. **Page authority.** Official rate sheets (`/rates`, `/business-rates`) > product pages and
-   official PDFs > other official pages > newsroom > blog > calculators, landing pages and
-   campaigns. Tag/author listings, tracking duplicates and spreadsheets are not indexed.
-3. **Effective dates beat page type.** If the same fact is stated with an older "Rates are
-   effective as of" date than another copy, the older table is stale. This is how calculator
-   and landing-page copies lose, and it also caught the rate sheet itself lagging a product
-   page once (business 17-month jumbo, Aug 2026).
-4. **Expired offers are dropped.** A page marked expired, or stating an offer end date before
-   the snapshot ("offer ended 2025-09-30"), never answers; its values only feed `conflicts()`.
-5. **Rates come only from rate rows.** Newsroom, blog, calculator and landing-page numbers
-   never answer a rate question.
-6. **Dated statements.** For counts about the credit union itself ("22 branch office
-   locations"), the newest dated statement wins. Year-tagged statistics ("294 employees used
-   VTO in 2023") are answered by year, and a running count ("the fifth time Forbes
-   recognized Dupaco") takes the newest statement.
-7. **Pages missing from a later snapshot** are carried forward but demoted: they never answer
-   rates or identifiers, rank at half weight, and the answer says the page was not in the
-   latest crawl. This keeps partial crawls safe without letting a deleted page beat a live one.
+I went with rules instead of an LLM on purpose. Most of the score is about numbers: one current value, no stale value anywhere in the answer, the same numbers across paraphrases, and under 2 seconds. Determinism handles all four, and anyone reviewing it can run it without keys.
+
+## How it decides what's current
+
+1. **Pick the snapshot.** `as_of` selects the latest snapshot taken on or before that date. If the date is before the first crawl, it uses the first one. If there's no `as_of`, an explicit phrase in the question like "in May 2026" or "as of 2026-05-31" does the same thing. Any other date in the question is treated as content, not scope.
+2. **Rank pages by authority.** Official rate sheets (`/rates`, `/business-rates`) come first, then product pages and official PDFs, then other official pages, then newsroom, then blog, then calculators, landing pages and campaigns. Tag and author listings, tracking duplicates and spreadsheets don't get indexed at all.
+3. **Effective dates win over page type.** If two copies of the same fact exist and one has an older "Rates are effective as of" date, the older table is stale. That's how calculator and landing-page copies lose. It also caught the rate sheet itself lagging behind a product page once (business 17-month jumbo, Aug 2026).
+4. **Expired offers are dropped.** If a page is marked expired, or says an offer ended before the snapshot date ("offer ended 2025-09-30"), it never answers anything. Its values only go into `conflicts()`.
+5. **Rates only come from rate rows.** Numbers from the newsroom, blog, calculators or landing pages never answer a rate question.
+6. **Dated statements.** For counts about the credit union itself ("22 branch office locations"), the newest dated statement wins. Stats tied to a year ("294 employees used VTO in 2023") get answered by year. For a running count ("the fifth time Forbes recognized Dupaco"), the newest statement wins.
+7. **Pages missing from a later snapshot** get carried forward but demoted. They never answer rates or identifiers, they rank at half weight, and the answer notes the page wasn't in the latest crawl. That keeps partial crawls safe without letting a deleted page beat a live one.
 
 ## Getting the tier right
 
-- Term, model year and balance or loan amount are **hard** constraints: a row that does not
-  match is a different fact and is dropped. They are applied before choosing the product, so
-  "$250,000 30-year mortgage" picks the mortgage tier that fits.
-- Model years are parsed to number ranges, because the labels move between snapshots
-  ("2023-26" became "2024-27").
-- Jumbo, IRA, business, intro, refinance and similar are **soft**: a row with a qualifier the
-  member did not ask for loses to one without it.
-- Without a tier, all tiers of the product are listed (mortgages by loan amount, certificates
-  by term); "highest/lowest" returns one row.
-- One tokenizer is shared by the index, the questions and every keyword list, so "five-year
-  CD", "60-month certificate" and "60 Months" are the same token, and paraphrases reach the
-  same rows.
+- Term, model year and balance or loan amount are **hard** constraints. If a row doesn't match, it's a different fact, so it gets dropped. These are applied before picking the product, so "$250,000 30-year mortgage" lands on the mortgage tier that actually fits.
+- Model years get parsed into number ranges, because the labels shift between snapshots ("2023-26" became "2024-27").
+- Jumbo, IRA, business, intro, refinance and similar qualifiers are **soft**. If a row has a qualifier the member didn't ask for, it loses to one that doesn't.
+- If no tier is given, it lists every tier of the product (mortgages by loan amount, certificates by term). "Highest" or "lowest" returns one row.
+- The index, the questions and every keyword list all share one tokenizer. So "five-year CD", "60-month certificate" and "60 Months" become the same token, and paraphrases hit the same rows.
 
-## When it declines
+## When it says no
 
-The answer says "isn't listed" (with `confident=False` and no extra numbers) when:
+It answers "isn't listed" (with `confident=False` and no extra numbers) when:
 
-- the question names a product variant the site talks about but does not price ("7/1 ARM",
-  "construction loan", "business loan rate");
-- a hard constraint has no row (96-month auto loan, 84 months on a 2019 car);
-- an explicit rate request matches no rate row;
-- "do you offer X" has no official page as evidence;
-- a named branch is unknown, or its hours/phone are not published (it never borrows another
-  branch's data);
-- a passage covers less than half of the question.
+- the question asks about a product variant the site mentions but doesn't price ("7/1 ARM", "construction loan", "business loan rate")
+- a hard constraint has no matching row (96-month auto loan, 84 months on a 2019 car)
+- someone explicitly asks for a rate and no rate row matches
+- a "do you offer X" question has no official page backing it up
+- a named branch is unknown, or its hours or phone aren't published (it never borrows another branch's data)
+- a passage covers less than half of the question
 
-It never asks for a ZIP code, member number or authentication.
+It never asks for a ZIP code, member number or any kind of authentication.
 
 ## conflicts()
 
-One entry per fact, with all values oldest first, sources, the winner and a reason. Facts
-are keyed on parsed numbers (product name, qualifiers, term, exact balance tier, overlapping
-model years), so a page redesign or a different tier never looks like a contradiction. Types:
+There's one entry per fact, with every value listed oldest first, plus sources, the winner and a reason. Facts are keyed on parsed values (product name, qualifiers, term, exact balance tier, overlapping model years), so a page redesign or a different tier doesn't show up as a contradiction. The types it catches:
 
-- rate sheet changed over time, and/or a stale copy elsewhere (calculator, landing page,
-  embedded table) with an older effective date;
-- expired promotion pages stating a different value;
-- counts repeated in boilerplate across 3+ pages ("19 / 20 / 22 / 23 / 24 branch office
-  locations" -> 22);
-- running counts ("fourth time" vs "fifth time" -> fifth).
+- the rate sheet changed over time, and/or a stale copy somewhere else (calculator, landing page, embedded table) has an older effective date
+- expired promotion pages showing a different value
+- counts repeated in boilerplate across 3+ pages ("19 / 20 / 22 / 23 / 24 branch office locations" -> 22)
+- running counts ("fourth time" vs "fifth time" -> fifth)
 
-The winner is always what `answer()` returns. Not listed: tier or metric differences,
-year-tagged statistics, and the Roth vs Traditional difference on one sheet (it may be
-intentional). 53 entries on the five snapshots.
+The winner is always what `answer()` returns. Things I left out on purpose: tier or metric differences, year-tagged stats, and the Roth vs Traditional difference on one sheet, since that might be intentional. On the five snapshots there are 53 entries.
 
 ## Results
 
 | Run | Score |
 |---|---|
-| Public practice set (40) | 0.969 (every scorable question; dup-005 has no `must_include`, so it cannot score) |
+| Public practice set (40) | 0.969 (every scorable question; dup-005 has no `must_include`, so it can't be scored) |
 | Kit selftest (different site) | 1.0, conflicts F1 1.0 |
 | My question bank (141: rewordings, as_of per snapshot, refusals, fees, counts, links) | 0.96, 0 stale-trap hits, paraphrase consistency 0.93 |
 
 ## Known limits
 
-- Hours exist only in 2021-2024 branch-opening press releases; the answer says so.
-- Lexical matching: "losing the key" does not match "lost key"; a few link and
-  eligibility questions pick a near-miss page.
-- The rules were shaped on this one site. Every rule is general (no answers, values or URLs
-  from the practice set are hard-coded), but new page layouts could need new parsing.
-- `conflicts()` may over-list "changed over time" entries if the hidden list only counts
-  same-moment contradictions.
+- Branch hours only show up in the 2021-2024 branch-opening press releases, and the answer says that.
+- Matching is lexical. "Losing the key" won't match "lost key", and a few link and eligibility questions land on a page that's close but not right.
+- I shaped the rules on this one site. Every rule is general (nothing from the practice set is hard-coded, no answers, values or URLs), but a new page layout could need new parsing.
+- `conflicts()` might over-list "changed over time" entries if the hidden list only counts contradictions that exist at the same moment.
 
 ## AI assistance
 
-I used an AI coding assistant (Claude Code) throughout, phase by phase: it explored the
-data with me, proposed options with trade-offs, wrote code after I agreed on each rule, and
-ran the evaluations. I reviewed every design decision and can explain each rule above.
+I used Claude Code throughout, one phase at a time. It explored the data with me, laid out options with trade-offs, wrote code once I'd agreed on each rule, and ran the evaluations. I reviewed every design decision and can explain each rule above.
